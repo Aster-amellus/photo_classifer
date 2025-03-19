@@ -13,10 +13,10 @@ from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
 import pandas as pd
 
-from photo_classifier.models.simclr import SimCLR
-from photo_classifier.utils.preprocessing.dataset import create_data_loaders
-from photo_classifier.utils.clustering.cluster import PhotoClustering
-from photo_classifier.utils.focus.focus_detection import FocusDetector
+from model.simclr import SimCLR
+from utils.preprocessing.dataset import create_data_loaders
+from utils.clustering.cluster import PhotoClustering
+from utils.focus.focus_detection import FocusDetector
 
 class SimCLRTrainer:
     def __init__(self, config):

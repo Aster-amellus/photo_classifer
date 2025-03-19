@@ -3,7 +3,7 @@ from torch.utils.data import Dataset, DataLoader
 import os
 from pathlib import Path
 import numpy as np
-from photo_classifier.utils.focus.focus_detection import FocusDetector
+from utils.focus.focus_detection import FocusDetector
 
 class PhotoDataset(Dataset):
     def __init__(self, image_paths, processor, transform=None, return_path=False):

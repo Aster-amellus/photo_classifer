@@ -1,88 +1,103 @@
 import cv2
 import numpy as np
-from skimage.filters import sobel
+import torch
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+from pathlib import Path
+import os
+from tqdm import tqdm
 
-class FocusDetector:
-    def __init__(self, laplacian_threshold=100, fft_threshold=10):
-        self.laplacian_threshold = laplacian_threshold
-        self.fft_threshold = fft_threshold
+class ImageProcessor:
+    def __init__(self, config):
+        self.config = config
+        self.image_size = config['image_size']
+        
+        # 数据预处理转换
+        self.transform = A.Compose([
+            A.Resize(self.image_size, self.image_size),
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ToTensorV2(),
+        ])
+        
+        # 数据增强转换（用于对比学习）
+        self.augment = A.Compose([
+            A.RandomResizedCrop(height=self.image_size, width=self.image_size, scale=(0.8, 1.0)),
+            A.RandomBrightnessContrast(p=0.5),
+            A.HorizontalFlip(p=0.5),
+            A.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1, p=0.5),
+            A.GaussianBlur(blur_limit=(3, 7), p=0.5),
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ToTensorV2(),
+        ])
     
-    def detect_focus_laplacian(self, image):
-        """使用拉普拉斯算子方差判断图片是否对焦"""
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        else:
-            gray = image
+    def load_image(self, image_path):
+        """加载图像文件"""
+        image = cv2.imread(str(image_path))
+        if image is None:
+            return None
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        return image
+    
+    def preprocess_image(self, image):
+        """预处理单张图像"""
+        return self.transform(image=image)["image"]
+    
+    def augment_image(self, image):
+        """对图像进行数据增强，返回两个增强版本用于对比学习"""
+        aug1 = self.augment(image=image)["image"]
+        aug2 = self.augment(image=image)["image"]
+        return aug1, aug2
+    
+    def scan_image_directory(self, data_dir=None):
+        """扫描图像目录，返回所有图像路径"""
+        if data_dir is None:
+            data_dir = self.config['data_dir']
             
-        # 计算拉普拉斯变换
-        laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+        data_dir = Path(data_dir)
+        image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp']
         
-        # 计算方差
-        score = np.var(laplacian)
+        image_paths = []
+        for ext in image_extensions:
+            image_paths.extend(list(data_dir.glob(f'**/*{ext}')))
+            image_paths.extend(list(data_dir.glob(f'**/*{ext.upper()}')))
         
-        return score, score > self.laplacian_threshold
+        return sorted(image_paths)
     
-    def detect_focus_fft(self, image):
-        """使用频域分析判断图片是否对焦"""
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    def batch_preprocess_images(self, image_paths, output_dir=None, max_images=None):
+        """批量预处理图像并保存"""
+        if output_dir is None:
+            output_dir = Path(self.config['output_dir']) / 'preprocessed'
         else:
-            gray = image
+            output_dir = Path(output_dir)
             
-        # 应用Fast Fourier Transform
-        f = np.fft.fft2(gray)
-        fshift = np.fft.fftshift(f)
+        output_dir.mkdir(parents=True, exist_ok=True)
         
-        # 计算频谱幅度
-        magnitude_spectrum = 20 * np.log(np.abs(fshift) + 1)
+        if max_images is not None:
+            image_paths = image_paths[:max_images]
         
-        # 分离高频和低频部分
-        rows, cols = gray.shape
-        crow, ccol = rows // 2, cols // 2
+        processed_paths = []
         
-        # 创建高频掩码（中心区域为低频）
-        mask_low = np.zeros((rows, cols), np.uint8)
-        mask_high = np.ones((rows, cols), np.uint8)
-        
-        r = min(rows, cols) // 8  # 低频区域半径
-        cv2.circle(mask_low, (ccol, crow), r, 1, -1)
-        cv2.circle(mask_high, (ccol, crow), r, 0, -1)
-        
-        # 计算高低频能量比
-        high_energy = np.sum(magnitude_spectrum * mask_high)
-        low_energy = np.sum(magnitude_spectrum * mask_low)
-        
-        ratio = high_energy / (low_energy + 1e-10)  # 避免除零
-        
-        return ratio, ratio > self.fft_threshold
-    
-    def detect_focus(self, image):
-        """结合多种方法判断图片是否对焦"""
-        laplacian_score, lap_focused = self.detect_focus_laplacian(image)
-        fft_ratio, fft_focused = self.detect_focus_fft(image)
-        
-        # 结合两种方法的结果
-        is_focused = lap_focused and fft_focused
-        focus_metrics = {
-            'laplacian_score': laplacian_score,
-            'fft_ratio': fft_ratio,
-            'is_focused': is_focused
-        }
-        
-        return is_focused, focus_metrics
-    
-    def get_focus_score(self, image):
-        """获取归一化的对焦分数(0-100)"""
-        laplacian_score, _ = self.detect_focus_laplacian(image)
-        fft_ratio, _ = self.detect_focus_fft(image)
-        
-        # 归一化拉普拉斯分数
-        norm_lap = min(100, laplacian_score / self.laplacian_threshold * 100)
-        
-        # 归一化FFT比率
-        norm_fft = min(100, fft_ratio / self.fft_threshold * 100)
-        
-        # 综合分数
-        focus_score = 0.6 * norm_lap + 0.4 * norm_fft
-        
-        return focus_score
+        for img_path in tqdm(image_paths, desc="Preprocessing images"):
+            try:
+                image = self.load_image(img_path)
+                if image is None:
+                    print(f"Failed to load image: {img_path}")
+                    continue
+                    
+                processed = self.preprocess_image(image)
+                
+                # 生成输出文件名
+                relative_path = img_path.relative_to(Path(self.config['data_dir']))
+                output_path = output_dir / relative_path
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # 保存预处理后的图像
+                processed_np = processed.permute(1, 2, 0).numpy() * 255
+                processed_np = processed_np.astype(np.uint8)
+                cv2.imwrite(str(output_path), cv2.cvtColor(processed_np, cv2.COLOR_RGB2BGR))
+                
+                processed_paths.append(output_path)
+            except Exception as e:
+                print(f"Error processing {img_path}: {e}")
+                
+        return processed_paths

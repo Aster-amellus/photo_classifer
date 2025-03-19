@@ -1,2 +1,14 @@
-data
+/data
 .venv
+data
+venv
+models
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite
+*.log
+*.csv
+*.jpg
