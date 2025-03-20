@@ -271,5 +271,3 @@ python utils/focus/focus_calibration.py \
 - EfficientNet模型架构
 - PyTorch深度学习框架
 - OpenCV计算机视觉库
-
-希望这个系统能帮助您轻松整理照片集！如有任何问题，请随时联系。
