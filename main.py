@@ -95,36 +95,44 @@ def train_mode(args, config):
     
     # 获取对焦分数
     print("计算对焦分数...")
-    focus_scores = []
-    is_focused_list = []
-    
+    # 创建增强的对焦检测器，启用GPU加速
     focus_detector = FocusDetector(
         laplacian_threshold=config['laplacian_threshold'],
-        fft_threshold=config['fft_threshold']
+        fft_threshold=config['fft_threshold'],
+        use_roi=True,
+        focus_roi_size=config.get('focus_roi_size', 0.6),
+        adaptive_threshold=config.get('adaptive_threshold', False),
+        use_weighted_regions=config.get('use_weighted_regions', True),
+        use_gpu=True,  # 启用GPU加速
+        light_mode=config.get('light_focus_mode', False),  # 快速模式选项
+        batch_size=config['batch_size']  # 使用相同的批量大小
     )
     
+    # 使用批量处理模式处理对焦分析
+    focus_scores = []
+    is_focused_list = []
+    batch_images = []
+    batch_paths = []
+    
+    print(f"使用批量处理模式计算对焦分数...")
     for batch in tqdm(focus_loader, desc="Processing focus quality"):
-        batch_images = batch['image'].numpy()
-        batch_paths = batch['path']
-        batch_scores = []
-        batch_focused = []
+        # 获取批量图像并转换为OpenCV格式
+        images = batch['image'].numpy()
+        paths = batch['path']
         
-        for img in batch_images:
-            # 转换为OpenCV格式
-            img = np.transpose(img, (1, 2, 0))
-            img = ((img * np.array([0.229, 0.224, 0.225])) + np.array([0.485, 0.456, 0.406])) * 255
-            img = img.astype(np.uint8)
+        # 转换为OpenCV格式 [B, C, H, W] -> [B, H, W, C]
+        images = np.transpose(images, (0, 2, 3, 1))
+        images = ((images * np.array([0.229, 0.224, 0.225])) + np.array([0.485, 0.456, 0.406])) * 255
+        images = images.astype(np.uint8)
+        
+        # 批量分析对焦质量
+        batch_results = focus_detector.analyze_images_batch(images)
+        
+        # 提取结果
+        for result, path in zip(batch_results, paths):
+            focus_scores.append(result['focus_score'])
+            is_focused_list.append(1.0 if result['is_focused'] else 0.0)
             
-            # 计算对焦分数
-            score = focus_detector.get_focus_score(img)
-            is_focused, _ = focus_detector.detect_focus(img)
-            
-            batch_scores.append(score)
-            batch_focused.append(1.0 if is_focused else 0.0)
-        
-        focus_scores.extend(batch_scores)
-        is_focused_list.extend(batch_focused)
-        
     focus_scores = np.array(focus_scores)
     is_focused_array = np.array(is_focused_list)
     
@@ -171,7 +179,7 @@ def predict_mode(args, config):
         config['laplacian_threshold'] = args.focus_threshold
     
     # 检查模型路径
-    if not args.model_path or not Path(config['models_dir']) / args.model_path.exists():
+    if not args.model_path or not (Path(config['models_dir']) / args.model_path).exists():
         model_file = Path(config['models_dir']) / 'final_model.pth'
         if not model_file.exists():
             model_file = Path(config['models_dir']) / 'best_model.pth'
@@ -206,7 +214,7 @@ def predict_mode(args, config):
     # 加载模型
     print(f"加载模型: {args.model_path}")
     trainer = SimCLRTrainer(config)
-    trainer.load_model(args.model_path)
+    trainer.load_model(Path(config['models_dir']) / args.model_path)
     
     # 提取特征
     print("提取图像特征...")
@@ -214,18 +222,49 @@ def predict_mode(args, config):
     
     # 获取对焦分数
     print("计算对焦分数...")
+    
+    # 创建增强的对焦检测器，启用GPU加速
     focus_detector = FocusDetector(
         laplacian_threshold=config['laplacian_threshold'],
-        fft_threshold=config['fft_threshold']
+        fft_threshold=config['fft_threshold'],
+        use_roi=True,
+        focus_roi_size=config.get('focus_roi_size', 0.6),
+        adaptive_threshold=config.get('adaptive_threshold', False),
+        use_weighted_regions=config.get('use_weighted_regions', True),
+        use_gpu=True,  # 启用GPU加速
+        light_mode=config.get('light_focus_mode', False),  # 快速模式选项
+        batch_size=config['batch_size']  # 使用相同的批量大小
     )
     
     focus_scores = []
-    for path in tqdm(paths, desc="Calculating focus scores"):
-        img = processor.load_image(path)
-        score = focus_detector.get_focus_score(img)
-        focus_scores.append(score)
+    is_focused_list = []
+    
+    # 批量处理以加速
+    batch_size = config['batch_size']
+    batched_paths = [paths[i:i+batch_size] for i in range(0, len(paths), batch_size)]
+    
+    for batch_paths in tqdm(batched_paths, desc="Calculating focus scores"):
+        # 加载一批图像
+        batch_images = []
+        for path in batch_paths:
+            img = processor.load_image(path)
+            if img is None:
+                # 如果无法加载图像，使用空图像占位
+                img = np.zeros((100, 100, 3), dtype=np.uint8)
+            batch_images.append(img)
+        
+        # 批量分析对焦质量
+        batch_results = focus_detector.analyze_images_batch(batch_images)
+        
+        # 提取结果
+        for result in batch_results:
+            focus_scores.append(result['focus_score'])
+            is_focused_list.append(1.0 if result['is_focused'] else 0.0)
     
     focus_scores = np.array(focus_scores)
+    is_focused_array = np.array(is_focused_list)
+    
+    print(f"对焦成功: {np.sum(is_focused_array)}/{len(is_focused_array)} ({np.mean(is_focused_array)*100:.2f}%)")
     
     # 加载聚类模型
     print(f"加载聚类模型: {args.cluster_model}")
@@ -314,18 +353,39 @@ def incremental_mode(args, config):
     
     # 获取对焦分数
     print("计算对焦分数...")
+    # 创建增强的对焦检测器
     focus_detector = FocusDetector(
         laplacian_threshold=config['laplacian_threshold'],
-        fft_threshold=config['fft_threshold']
+        fft_threshold=config['fft_threshold'],
+        use_roi=True,
+        focus_roi_size=config.get('focus_roi_size', 0.6),
+        adaptive_threshold=config.get('adaptive_threshold', False),
+        use_weighted_regions=config.get('use_weighted_regions', True)
     )
     
     focus_scores = []
+    is_focused_list = []
+    
     for path in tqdm(paths, desc="Calculating focus scores"):
         img = processor.load_image(path)
-        score = focus_detector.get_focus_score(img)
+        if img is None:
+            focus_scores.append(0.0)
+            is_focused_list.append(0.0)
+            continue
+            
+        # 使用增强的对焦分析
+        result = focus_detector.analyze_focus_quality(img)
+        score = result['focus_score']
+        is_focused = result['is_focused']
+        
         focus_scores.append(score)
+        is_focused_list.append(1.0 if is_focused else 0.0)
     
     focus_scores = np.array(focus_scores)
+    
+    # 输出对焦统计信息
+    is_focused_array = np.array(is_focused_list)
+    print(f"对焦成功: {np.sum(is_focused_array)}/{len(is_focused_array)} ({np.mean(is_focused_array)*100:.2f}%)")
     
     # 加载聚类模型
     print(f"加载聚类模型: {args.cluster_model}")
