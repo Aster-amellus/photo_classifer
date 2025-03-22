@@ -185,13 +185,54 @@ class SimCLRTrainer:
     
     def visualize_features(self, features, labels, image_paths=None, focus_scores=None, n_samples=1000, method='tsne'):
         """可视化特征分布"""
+        # 检查维度一致性
+        n_features = len(features)
+        n_labels = len(labels)
+        n_paths = len(image_paths) if image_paths is not None else 0
+        n_scores = len(focus_scores) if focus_scores is not None else 0
+        
+        if n_features != n_labels:
+            print(f"警告: 特征数量 ({n_features}) 与标签数量 ({n_labels}) 不一致")
+            # 使用较小的长度
+            n_samples = min(n_features, n_labels, n_samples)
+        
+        if image_paths is not None and n_paths != n_features:
+            print(f"警告: 路径数量 ({n_paths}) 与特征数量 ({n_features}) 不一致")
+            # 路径数量不足时禁用路径采样
+            if n_paths < n_features:
+                print("路径数量不足，不进行路径采样")
+                image_paths = None
+        
+        if focus_scores is not None and n_scores != n_features:
+            print(f"警告: 对焦分数数量 ({n_scores}) 与特征数量 ({n_features}) 不一致")
+            # 分数数量不足时禁用分数采样
+            if n_scores < n_features:
+                print("对焦分数数量不足，不进行对焦分数采样")
+                focus_scores = None
+        
         # 如果特征数量太多，随机采样
-        if len(features) > n_samples:
-            indices = np.random.choice(len(features), n_samples, replace=False)
+        if n_features > n_samples:
+            print(f"特征数量 ({n_features}) 超过采样限制 ({n_samples})，进行随机采样")
+            # 生成随机索引，确保不超出最小长度
+            max_index = min(n_features, n_labels) - 1
+            indices = np.random.choice(max_index + 1, min(n_samples, max_index + 1), replace=False)
+            
             sampled_features = features[indices]
             sampled_labels = labels[indices]
-            sampled_paths = [image_paths[i] for i in indices] if image_paths else None
-            sampled_focus_scores = focus_scores[indices] if focus_scores is not None else None
+            
+            # 安全地采样路径和分数
+            if image_paths is not None:
+                # 确保索引不超过路径数组长度
+                valid_indices = [i for i in indices if i < len(image_paths)]
+                sampled_paths = [image_paths[i] for i in valid_indices] if valid_indices else None
+            else:
+                sampled_paths = None
+                
+            if focus_scores is not None:
+                # 确保索引不超过分数数组长度
+                sampled_focus_scores = focus_scores[indices] if all(i < len(focus_scores) for i in indices) else None
+            else:
+                sampled_focus_scores = None
         else:
             sampled_features = features
             sampled_labels = labels
@@ -205,11 +246,25 @@ class SimCLRTrainer:
         else:  # PCA
             print("使用PCA进行降维...")
             reducer = PCA(n_components=2, random_state=42)
-            
-        embedded = reducer.fit_transform(sampled_features)
+                
+        # 安全地进行降维
+        try:
+            embedded = reducer.fit_transform(sampled_features)
+        except Exception as e:
+            print(f"降维失败: {e}")
+            print("尝试减少样本数量或使用PCA方法")
+            return
         
         # 绘制散点图
         plt.figure(figsize=(12, 10))
+        
+        # 确定点大小
+        point_sizes = 50
+        if sampled_focus_scores is not None:
+            # 归一化分数并调整大小
+            min_size, max_size = 20, 100
+            norm_scores = np.clip(sampled_focus_scores, 0, 100) / 100
+            point_sizes = min_size + norm_scores * (max_size - min_size)
         
         scatter = plt.scatter(
             embedded[:, 0], 
@@ -217,7 +272,7 @@ class SimCLRTrainer:
             c=sampled_labels, 
             cmap='tab20', 
             alpha=0.7,
-            s=50 if sampled_focus_scores is None else sampled_focus_scores
+            s=point_sizes
         )
         
         # 添加图例
@@ -253,29 +308,32 @@ class SimCLRTrainer:
         plt.savefig(output_dir / f'feature_visualization_{method}.png', dpi=300)
         plt.close()
         
-        # 如果有图像路径，保存交互式HTML可视化
-        if sampled_paths:
+        # 如果有图像路径，保存交互式HTML可视化（如果可能）
+        if sampled_paths and len(sampled_paths) > 0:
             try:
                 import plotly.express as px
-                import plotly.graph_objects as go
                 
                 # 提取文件名
                 file_names = [Path(p).name for p in sampled_paths]
                 
                 # 创建数据框
-                df = pd.DataFrame({
+                df_data = {
                     'x': embedded[:, 0],
                     'y': embedded[:, 1],
                     'cluster': sampled_labels,
-                    'file': file_names,
-                    'focus_score': sampled_focus_scores if sampled_focus_scores is not None else [None] * len(embedded)
-                })
+                    'file': file_names
+                }
+                
+                if sampled_focus_scores is not None:
+                    df_data['focus_score'] = sampled_focus_scores
+                    
+                df = pd.DataFrame(df_data)
                 
                 # 创建Plotly图
                 fig = px.scatter(
                     df, x='x', y='y', 
                     color='cluster', 
-                    hover_data=['file', 'focus_score'],
+                    hover_data=['file'] + (['focus_score'] if sampled_focus_scores is not None else []),
                     size='focus_score' if sampled_focus_scores is not None else None,
                     size_max=15,
                     title=f'Interactive Feature Visualization ({method.upper()})'
@@ -283,6 +341,9 @@ class SimCLRTrainer:
                 
                 # 保存为HTML
                 fig.write_html(output_dir / f'interactive_visualization_{method}.html')
+                print(f"交互式可视化已保存到: {output_dir / f'interactive_visualization_{method}.html'}")
                 
             except ImportError:
                 print("plotly库未安装，跳过交互式可视化")
+            except Exception as e:
+                print(f"创建交互式可视化时出错: {e}")

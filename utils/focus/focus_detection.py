@@ -647,12 +647,33 @@ class FocusDetector:
     def _prepare_batch_tensor(self, images):
         """将图像列表转换为批量张量并移至GPU"""
         batch_tensor = []
+        target_size = None
+        
+        # 首先确定目标尺寸 (使用第一个非空图像的尺寸或使用固定尺寸)
+        for img in images:
+            if img is not None and img.size > 0:
+                # 采用固定大小，确保所有图像处理统一
+                target_size = (384, 384)  # 使用配置中的image_size更好，这里使用固定值作为示例
+                break
+        
+        if target_size is None:
+            # 如果没有有效图像，使用默认尺寸
+            target_size = (384, 384)
         
         for img in images:
-            # 转换为RGB格式（如果不是）
+            if img is None or img.size == 0:
+                # 如果图像为空，创建一个空白图像
+                img = np.zeros((target_size[0], target_size[1], 3), dtype=np.uint8)
+            
+            # 确保是RGB格式
             if len(img.shape) == 2:  # 灰度图
                 img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-            elif img.shape[2] == 3 and img.dtype == np.uint8:  # RGB图像但是uint8格式
+            
+            # 调整图像大小到统一尺寸
+            img = cv2.resize(img, target_size)
+            
+            # 如果是uint8格式，转换为float32并归一化
+            if img.dtype == np.uint8:
                 img = img.astype(np.float32) / 255.0
             
             # 转换为PyTorch张量格式 [C, H, W]

@@ -52,12 +52,16 @@ def create_data_loaders(config, image_paths, processor, contrastive=False):
     else:
         dataset = PhotoDataset(image_paths, processor, return_path=True)
         
+    # 确保数据加载器在预测模式下保持顺序
+    shuffle = True if contrastive else False
+    
     loader = DataLoader(
         dataset,
         batch_size=config['batch_size'],
-        shuffle=True if contrastive else False,
+        shuffle=shuffle,
         num_workers=config['num_workers'],
-        pin_memory=True
+        pin_memory=True,
+        drop_last=False  # 不丢弃最后的小批量，确保处理所有图像
     )
     
     return loader

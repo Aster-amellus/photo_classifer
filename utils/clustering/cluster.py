@@ -9,6 +9,8 @@ from pathlib import Path
 import pickle
 import os
 import shutil
+import time
+from collections import Counter
 
 class PhotoClustering:
     def __init__(self, config):
@@ -202,41 +204,50 @@ class PhotoClustering:
         self.min_samples = model_data['min_samples']
         self.optimized_clusters = model_data['optimized_clusters']
         
-    def organize_photos(self, image_paths, labels, focus_scores=None, output_dir=None):
+    def organize_photos(self, image_paths, labels, focus_scores=None):
         """根据聚类结果组织照片"""
-        if output_dir is None:
-            output_dir = Path(self.config['output_dir']) / 'organized_photos'
-        else:
-            output_dir = Path(output_dir)
-            
+        # 创建输出目录
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        output_dir = Path(self.config['output_dir']) / f'organized_photos_{timestamp}'
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        # 确保标签是numpy数组
-        labels = np.array(labels)
+        # 如果没有提供对焦分数，则创建一个默认的最佳对焦分数
+        if focus_scores is None:
+            focus_scores = np.ones(len(image_paths)) * 100  # 设置为最大对焦分数
         
-        # 获取唯一标签
-        unique_labels = np.unique(labels)
+        # 查找每个类别的照片数量
+        cluster_counts = Counter(labels)
         
-        # 为每个簇创建目录
-        for label in unique_labels:
-            (output_dir / f'cluster_{label}').mkdir(exist_ok=True)
+        # 按照照片数量对类别进行排序（从大到小）
+        sorted_clusters = sorted(cluster_counts.items(), key=lambda x: x[1], reverse=True)
+        
+        # 创建映射字典，将原始标签映射到新的有序标签
+        cluster_mapping = {old_label: i for i, (old_label, _) in enumerate(sorted_clusters)}
+        
+        # 创建复制任务列表
+        copy_tasks = []
+        
+        for path, label, focus_score in zip(image_paths, labels, focus_scores):
+            # 获取新的有序标签
+            new_label = cluster_mapping[label]
             
-            # 为低对焦分数创建子目录
-            if focus_scores is not None:
-                (output_dir / f'cluster_{label}' / 'low_focus').mkdir(exist_ok=True)
-        
-        # 将照片复制到相应的目录
-        for idx, (image_path, label) in enumerate(zip(image_paths, labels)):
-            image_path = Path(image_path)
-            
-            # 决定是否放入低对焦目录
-            if focus_scores is not None and focus_scores[idx] < 50:  # 50%的对焦阈值
-                dest_dir = output_dir / f'cluster_{label}' / 'low_focus'
+            # 确定目标目录（是否对焦良好）
+            if focus_score >= 50:  # 对焦良好的阈值
+                target_dir = output_dir / f'cluster_{new_label:03d}'
             else:
-                dest_dir = output_dir / f'cluster_{label}'
-                
-            # 复制文件
-            dest_path = dest_dir / image_path.name
-            shutil.copy2(image_path, dest_path)
+                target_dir = output_dir / f'cluster_{new_label:03d}' / 'low_focus'
             
+            # 创建目标目录
+            target_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 目标文件路径
+            target_path = target_dir / Path(path).name
+            
+            # 添加到复制任务列表
+            copy_tasks.append((path, target_path))
+        
+        # 执行复制任务
+        for src, dst in copy_tasks:
+            shutil.copy2(src, dst)
+        
         return output_dir
